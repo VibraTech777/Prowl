@@ -1,0 +1,37 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+reports/*.json
+reports/*.pdf
+
+# Generated reports at root level
+*.pdf
+*.json
+
+# Local env overrides
+.env.local
+.env.prod
+
+# Test / coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+
+# Type checker and linter caches
+.mypy_cache/
+.ruff_cache/
+
+# IDE files
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
