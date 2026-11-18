@@ -4,6 +4,8 @@
 
 Prowl is an open-source CLI that automates company reconnaissance: DNS records, certificates, WHOIS, GitHub org members, employee emails, French corporate registries, web crawl, and more — all from a single command. Built for stability and precision over speed, with verbose output so you always know what it found and why.
 
+The built-in web crawler is on by default: it fetches the target's public web pages (semi-active, `robots.txt` always respected). Run with `--no-crawl` and Prowl never contacts the target's web servers.
+
 ---
 
 ## ⚡ Install
@@ -27,6 +29,9 @@ cp .env.example .env
 ```bash
 # Basic recon on any domain
 prowl -d acme.com
+
+# Without the web crawler: never contacts the target's web servers
+prowl -d acme.com --no-crawl
 
 # French company — adds BODACC, Annuaire Entreprises, Pappers
 prowl -d acme.fr --french --siren 123456789

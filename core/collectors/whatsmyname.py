@@ -9,6 +9,11 @@ A site check, as WhatsMyName defines it: GET uri_check with {account} replaced; 
 exists if the status is the expected one (e_code, usually 200), the body contains e_string
 (when given) and does NOT contain m_string (the "no such user" marker).
 
+Sites whose check URL is a free-text SEARCH (?q={account}, ?inname={account}…) answer 200 for
+fuzzy matches too (a substring of a display name, an unrelated account). For those, the hit is
+kept only if the username appears in the response as a whole word (see is_search_style /
+contains_whole_word). Exact-profile checks are not affected.
+
 A username match is NOT an identity match: the same login on another site may belong to
 someone else. Findings say so; severity is only a hint about the kind of platform.
 
@@ -22,7 +27,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from urllib.parse import quote, urlparse
+import re
+from urllib.parse import parse_qsl, quote, urlparse
 
 import httpx
 
@@ -43,11 +49,38 @@ PROFESSIONAL_CATEGORIES = {"professional", "business"}
 # with repos, followers, languages). "GitHub (Gists)" is NOT excluded: other URL, other data.
 EXCLUDED_SITES = {"GitHub (User)"}
 
+# Query parameters that carry a free-text search term. Deliberately NOT "username": exact lookups
+# such as HudsonRock or the OTX validator use it and their answer does not repeat the username.
+_SEARCH_PARAMS = frozenset({"q", "query", "search", "inname", "term", "keyword", "user_nick"})
+
 _LIST_TIMEOUT = 20
 _SITE_TIMEOUT = 5            # slow sites are skipped
 _CONCURRENCY = 5
 _MAX_BODY = 256 * 1024       # never read more than this from a profile page
 _HEADERS = {"User-Agent": "Prowl OSINT / github.com/prowl"}
+
+
+def is_search_style(site: dict) -> bool:
+    """True if the check URL puts {account} into a free-text search parameter (fuzzy matching)."""
+    url = site.get("uri_check") or site.get("check_uri") or ""
+    return any(
+        key.lower() in _SEARCH_PARAMS and "{account}" in value
+        for key, value in parse_qsl(urlparse(url).query, keep_blank_values=True)
+    )
+
+
+def contains_whole_word(text: str, word: str) -> bool:
+    """
+    Case-insensitive: `word` appears in `text` as a whole username, not inside a longer one.
+    Letters, digits, "_" and "-" glue to the word ("usulpro-fan" is another account), and so
+    does a "." between two alphanumerics ("john.smith"), but a sentence-ending "." does not.
+    """
+    pattern = (
+        r"(?<![A-Za-z0-9_-])(?<![A-Za-z0-9]\.)"
+        + re.escape(word)
+        + r"(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])"
+    )
+    return re.search(pattern, text, re.IGNORECASE) is not None
 
 
 def select_sites(data: dict) -> list[dict]:
@@ -164,6 +197,8 @@ class WhatsMyNameCollector(BasePersonCollector):
             return None
         if missing and missing in text:
             return None
+        if is_search_style(site) and not contains_whole_word(text, login):
+            return None                      # a fuzzy search hit, not this username
         profile_url = site.get("uri_pretty", "").replace("{account}", quote(login, safe="")) or url
         finding = self._finding(person, login, site, profile_url)
         self._progress(finding=finding)                  # shown now, not at the end of the run

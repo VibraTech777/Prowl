@@ -293,3 +293,63 @@ async def test_no_callback_no_output(respx_mock, person, target):
     c = WhatsMyNameCollector()
     assert c.on_progress is None
     assert len((await c.collect_person(person, target)).findings) == 1
+
+
+# ── search-style sites: fuzzy hits are not this username ─────────────────────
+
+from core.collectors.whatsmyname import contains_whole_word, is_search_style  # noqa: E402
+
+
+def test_search_style_detection_looks_at_parameter_names_only():
+    def style(url):
+        return is_search_style({"uri_check": url})
+
+    assert style("https://mastodon.social/api/v2/search?q={account}&limit=1&type=accounts")
+    assert style("https://api.stackexchange.com/2.3/users?order=desc&inname={account}&site=so")
+    assert style("https://greasyfork.org/en/users?q={account}")
+    assert style("https://chatovka.net/search?user_nick=+{account}&x=on")
+    assert style("https://x.test/?Search={account}")                          # case-insensitive key
+    # exact lookups: not search-style, even with "search" in the path or "username=" in the query
+    assert not style("https://cavalier.hudsonrock.com/api/json/v2/search-by-username?username={account}")
+    assert not style("https://otx.alienvault.com/otxapi/auth/validate?username={account}")
+    assert not style("https://www.instagram.com/{account}/")
+    assert not style("https://bitbucket.org/!api/2.0/repositories/{account}?page=1&q")   # q has no {account}
+    assert not style("https://x.test/profile?next={account}")
+
+
+def test_whole_word_matching():
+    yes = [
+        ("usulpro", "UsulPro"), ('"acct":"pwnwithlove@infosec.exchange"', "pwnwithlove"),
+        ("https://infosec.exchange/@pwnwithlove", "pwnwithlove"), ("hi, I am usulpro.", "usulpro"),
+        ("B-i-t-K", "b-i-t-k"), ("Usulpro Fan", "usulpro"),
+    ]
+    no = [
+        ("TheOptionalJohnSmith", "johnsmi"), ("usulpro-fan", "usulpro"), ("usulpro_dev", "usulpro"),
+        ("john.smith", "john"), ("xusulpro", "usulpro"), ("bikmaev_yoga tk _", "B-i-t-K"), ("", "usulpro"),
+    ]
+    for text, word in yes:
+        assert contains_whole_word(text, word), (text, word)
+    for text, word in no:
+        assert not contains_whole_word(text, word), (text, word)
+
+
+async def test_search_style_hits_must_contain_the_username(respx_mock, person, target):
+    search = {"uri_check": "https://search.test/api?q={account}", "e_string": "acct"}
+    _wmn(respx_mock, _site("FuzzySearch", **search),
+         _site("Exact", uri_check="https://exact.test/check?username={account}", e_string="infected"),
+         _site("Profile"))
+    # fuzzy search: answers 200 with an unrelated account → rejected
+    respx_mock.get(url__regex=r"https://search\.test/.*").respond(
+        200, text='{"accounts":[{"acct":"bikmaev_yoga@threads.net"}]}')
+    # exact lookup whose answer does not repeat the username → kept (not search-style)
+    respx_mock.get(url__regex=r"https://exact\.test/.*").respond(200, text="This computer was infected")
+    # profile page that never prints the username → kept
+    respx_mock.get("https://profile.test/u/jdoe").respond(200, text="<title>Jane</title>")
+    result = await WhatsMyNameCollector().collect_person(person, target)
+    assert sorted(f.raw_data["site"] for f in result.findings) == ["Exact", "Profile"]
+
+    # the same search endpoint answering with the exact account → kept
+    respx_mock.get(url__regex=r"https://search\.test/.*").respond(
+        200, text='{"accounts":[{"acct":"jdoe@infosec.exchange"}]}')
+    result = await WhatsMyNameCollector().collect_person(person, target)
+    assert "FuzzySearch" in {f.raw_data["site"] for f in result.findings}
