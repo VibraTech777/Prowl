@@ -196,7 +196,11 @@ async def test_disallowed_urls_are_never_requested(respx_mock):
     assert "/login" not in requested                      # linked, but disallowed
     assert "/.env" not in requested                       # sensitive probe, disallowed
     assert not any("Login form" in f.title for f in result.findings)
-    assert not any(".env" in f.title for f in result.findings)
+    assert not any(f.title.startswith("Sensitive path accessible") for f in result.findings)
+    # ...but the rules themselves are reported (information only, nothing was requested)
+    robots_finding = next(f for f in result.findings if f.title.startswith("robots.txt discloses"))
+    assert robots_finding.severity is Severity.MEDIUM
+    assert robots_finding.raw_data["disallow"] == ["/login", "/.env"]
 
 
 async def test_rules_for_our_own_user_agent_apply(respx_mock):
@@ -325,3 +329,100 @@ def test_analyze_parses_a_response_without_any_request():
     page = WebCrawlCollector()._analyze(resp, "https://example.com/robots.txt", 0)
     assert (page.url, page.status_code, page.emails) == (
         "https://example.com/robots.txt", 200, ["a@example.com"])
+
+
+# ── robots.txt content as a finding ──────────────────────────────────────────
+
+from core.collectors.web_crawl import parse_robots_rules  # noqa: E402
+
+
+def _robots_findings(result):
+    return [f for f in result.findings if f.title.startswith("robots.txt discloses")]
+
+
+def test_parse_robots_rules():
+    text = """
+# comment line
+User-agent: *
+Disallow: /admin/        # trailing comment
+Disallow: /private
+DISALLOW: /*.sql$
+Disallow:
+Disallow: /
+Disallow: /private
+Allow: /public
+
+User-agent: BadBot
+Disallow: /api/v2
+Sitemap: https://example.com/sitemap.xml
+sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/news.xml
+"""
+    disallowed, sitemaps = parse_robots_rules(text)
+    assert disallowed == ["/admin/", "/private", "/*.sql$", "/api/v2"]   # deduped, "" and "/" ignored
+    assert sitemaps == ["https://example.com/sitemap.xml", "https://example.com/news.xml"]
+    assert parse_robots_rules("") == ([], []) and parse_robots_rules("<html>Not found</html>") == ([], [])
+
+
+async def test_sensitive_disallow_makes_one_medium_finding(respx_mock):
+    requested = _robots_site(respx_mock, (
+        "User-agent: *\nDisallow: /search\nDisallow: /admin/\nDisallow: /backup\n"
+        "Disallow: /*.sql$\nSitemap: https://example.com/sitemap.xml\n"))
+    result = await WebCrawlCollector().collect(_target(0))
+
+    (f,) = _robots_findings(result)
+    assert f.severity is Severity.MEDIUM and f.category is Category.WEB_FINDING
+    assert f.title == "robots.txt discloses 4 disallowed paths — sensitive: /admin/, /backup, /*.sql$"
+    assert "/search" in f.description and "Sitemaps: https://example.com/sitemap.xml" in f.description
+    assert "never requests them" in f.description
+    assert f.raw_data["disallow"] == ["/search", "/admin/", "/backup", "/*.sql$"]
+    assert f.raw_data["sensitive"] == ["/admin/", "/backup", "/*.sql$"]
+    assert f.source == "Web Crawler" and f.source_url == "https://example.com/robots.txt"
+    assert f.mitre_attack == "T1594" and f.affected_asset == "example.com"
+    # reporting is not requesting: no disallowed path is ever fetched, robots.txt only once
+    assert not {"/admin/", "/admin", "/backup"} & set(requested) and requested.count("/robots.txt") == 1
+
+
+async def test_benign_disallow_is_info(respx_mock):
+    _robots_site(respx_mock, "User-agent: *\nDisallow: /search\nDisallow: /cart\nDisallow: /tmp/\n")
+    (f,) = _robots_findings(await WebCrawlCollector().collect(_target(0)))
+    assert f.severity is Severity.INFO
+    assert f.title == "robots.txt discloses 3 disallowed paths" and f.raw_data["sensitive"] == []
+
+
+async def test_single_rule_wording(respx_mock):
+    _robots_site(respx_mock, "User-agent: *\nDisallow: /staging\n")       # /staging scores 40: INFO
+    (f,) = _robots_findings(await WebCrawlCollector().collect(_target(0)))
+    assert f.title == "robots.txt discloses 1 disallowed path" and f.severity is Severity.INFO
+
+
+@pytest.mark.parametrize("robots, status", [
+    ("User-agent: *\nDisallow:\n", 200),                   # empty Disallow = allow everything
+    ("User-agent: *\nAllow: /\nSitemap: https://example.com/s.xml\n", 200),
+    ("<html><body>Page not found</body></html>", 200),       # soft-404 served as robots.txt
+    ("", 200),
+    ("", 404),
+])
+async def test_no_disallow_rules_no_finding(respx_mock, robots, status):
+    _robots_site(respx_mock, robots, robots_status=status)
+    assert _robots_findings(await WebCrawlCollector().collect(_target(0))) == []
+
+
+async def test_long_robots_is_capped_in_the_description_not_in_the_data(respx_mock):
+    rules = "".join(f"Disallow: /dir{i}/\n" for i in range(60))
+    _robots_site(respx_mock, "User-agent: *\n" + rules)
+    (f,) = _robots_findings(await WebCrawlCollector().collect(_target(0)))
+    assert f.title == "robots.txt discloses 60 disallowed paths"
+    assert "/dir24/" in f.description and "/dir25/" not in f.description    # 25 spelled out
+    assert "… and 35 more." in f.description
+    assert len(f.raw_data["disallow"]) == 60
+
+
+async def test_robots_finding_is_streamed_and_returned_once(respx_mock):
+    _robots_site(respx_mock, "User-agent: *\nDisallow: /admin\n")
+    c = WebCrawlCollector()
+    streamed = []
+    c.on_progress = lambda message, finding=None: streamed.append(finding) if finding else None
+    result = await c.collect(_target(0))
+    (f,) = _robots_findings(result)
+    assert any(s is f for s in streamed)

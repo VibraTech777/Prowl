@@ -79,7 +79,7 @@ async def test_crtsh_reports_each_failed_attempt_before_retrying(respx_mock, tar
 
     msgs = _messages(events)
     assert msgs[0].startswith("[crt.sh] Starting scan")
-    assert msgs[1].startswith("[crt.sh] Attempt 1/2 failed (HTTPStatusError) — retrying in")
+    assert msgs[1].startswith("[crt.sh] Attempt 1/3 failed (HTTPStatusError) — retrying in")
     assert len(result.findings) == 1 and len(_findings(events)) == 1
 
 
@@ -87,7 +87,7 @@ async def test_crtsh_failure_still_raises_and_streams_nothing(respx_mock, target
     respx_mock.get(url__regex=r"https://crt\.sh/.*").respond(502)
     c = CrtshCollector()
     events = _record(c)
-    with pytest.raises(RuntimeError, match="unreachable after 2 attempts"):
+    with pytest.raises(RuntimeError, match="unreachable after 3 attempts"):
         await c.collect(target)
     assert _findings(events) == []
 

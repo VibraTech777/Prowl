@@ -18,9 +18,12 @@ from core.models import Category, CollectorResult, Finding, OsintTarget, Severit
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 2
-_RETRY_DELAY = 2  # seconds; the wait grows linearly: 2 s after attempt 1, 4 s after attempt 2, …
-_REQUEST_TIMEOUT = 10  # seconds per attempt
+_MAX_RETRIES = 3
+_RETRY_DELAY = 5  # seconds; the wait grows linearly: 5 s after attempt 1, 10 s after attempt 2, …
+# crt.sh answers a fresh query in 5-30+ s (then in <1 s, from its cache) and returns passing 502s: a
+# short timeout or backoff fails exactly the request that would have succeeded. Phase 1 runs
+# concurrently, so the wait is hidden behind the slower collectors.
+_REQUEST_TIMEOUT = 45  # seconds per attempt
 
 # Subdomains containing these keywords are escalated to MEDIUM severity
 # because they often expose dev/staging environments or admin interfaces.

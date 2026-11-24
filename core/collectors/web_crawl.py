@@ -14,6 +14,16 @@ robots.txt is respected (RFC 9309): fetched first, then
     and the failure is reported (the RFC says to assume a full disallow).
 There is deliberately no way to bypass it. robots.txt is downloaded once; the probe of
 /robots.txt itself reuses that response.
+
+The file is also REPORTED: its Disallow rules are paths the site wants crawlers to avoid, which
+is often where the interesting things are. They are listed in one finding (MEDIUM if a path looks
+sensitive, INFO otherwise) and are never requested.
+
+The same goes for the other files a site publishes about itself (core/crawler/discovery.py):
+sitemap.xml (and the sitemaps robots.txt declares), security.txt, OpenID Connect configuration,
+Android / Apple app-link files, humans.txt, crossdomain.xml, clientaccesspolicy.xml. Each is one
+GET, only if robots.txt allows it, read as text and reported — the URLs they list are never
+requested.
 """
 
 from __future__ import annotations
@@ -30,6 +40,7 @@ import httpx
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
 from core.collectors.base import BaseCollector, CollectorSkipped
+from core.crawler.discovery import DISCOVERY_PATHS, MAX_BYTES, PARSERS, build_finding
 from core.crawler.link_scorer import score_url
 from core.crawler.page_models import FormInfo, PageAnalysis
 from core.models import Category, CollectorResult, Finding, OsintTarget, Severity
@@ -40,7 +51,10 @@ _USER_AGENT = "Mozilla/5.0 (compatible; Prowl/0.1.0; +https://github.com/prowl)"
 _EMAIL_RE   = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 
 # Interesting extensions to probe even if not linked
-_PROBE_PATHS = ["/.git/HEAD", "/.env", "/.htpasswd", "/robots.txt", "/sitemap.xml"]
+_PROBE_PATHS = ["/.git/HEAD", "/.env", "/.htpasswd", "/robots.txt"]
+
+# Sitemaps declared in robots.txt (in scope) fetched in addition to /sitemap.xml
+_MAX_DECLARED_SITEMAPS = 3
 
 # Score threshold to generate a Finding
 _FINDING_THRESHOLD = 50
@@ -55,6 +69,43 @@ _MAX_PAGES = 100
 _ROBOTS_TOKEN = "Prowl"              # product token matched against "User-agent:" lines
 _ROBOTS_MAX_BYTES = 500 * 1024       # RFC 9309: parse at least 500 KiB
 _MAX_CRAWL_DELAY = 5.0               # a huge Crawl-delay must not stall the whole scan
+
+# robots.txt content, reported as a finding
+_ROBOTS_SENSITIVE_SCORE = 50         # a Disallow path scoring this much (link_scorer) → MEDIUM
+_ROBOTS_MAX_RULES = 500              # rules kept (raw_data); a few huge files have thousands
+_ROBOTS_LISTED = 25                  # paths spelled out in the description
+_DISALLOW_RE = re.compile(r"^\s*disallow\s*:\s*(\S*)", re.IGNORECASE)
+_SITEMAP_RE = re.compile(r"^\s*sitemap\s*:\s*(\S+)", re.IGNORECASE)
+
+
+def parse_robots_rules(text: str) -> tuple[list[str], list[str]]:
+    """
+    (Disallow paths, Sitemap URLs) of a robots.txt, deduplicated, in file order.
+
+    Every User-agent group counts: a rule aimed at another robot is still a path the site wants
+    hidden. Comments are stripped; an empty "Disallow:" (= allow everything) and a bare "/" (a
+    blanket ban, nothing to learn from it) are ignored.
+    """
+    disallowed: list[str] = []
+    sitemaps: list[str] = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0]
+        if m := _DISALLOW_RE.match(line):
+            path = m.group(1)
+            if path and path != "/" and path not in disallowed and len(disallowed) < _ROBOTS_MAX_RULES:
+                disallowed.append(path)
+        elif m := _SITEMAP_RE.match(line):
+            if m.group(1) not in sitemaps:
+                sitemaps.append(m.group(1))
+    return disallowed, sitemaps
+
+
+def _robots_path_score(path: str) -> int:
+    """Interest score (link_scorer) of a Disallow pattern: wildcards and "$" are dropped first."""
+    cleaned = path.replace("*", "").replace("$", "").split("?")[0]
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    return score_url("https://x.invalid" + cleaned)
 
 
 def _parse_html(text: str) -> BeautifulSoup:
@@ -127,11 +178,16 @@ class WebCrawlCollector(BaseCollector):
                     pages.append(page)
                 await asyncio.sleep(robots.delay())
 
+            discovered = await self._discover(client, robots, robots_response, target)
+
         if robots.blocked:
             logger.info("Web Crawler: %d URL(s) skipped (robots.txt)", robots.blocked)
             self._progress(f"[Web Crawler] robots.txt respected: {robots.blocked} URL(s) not crawled")
 
         findings.extend(self._pages_to_findings(pages, target))
+        if robots_response.status_code == 200 and (f := self._robots_finding(robots_response, target)):
+            findings.append(f)
+        findings.extend(discovered)
         for f in findings:
             self._progress(finding=f)           # findings need the whole crawl (dedup across pages)
         logger.info("Web Crawler: %d pages crawled, %d findings", len(pages), len(findings))
@@ -315,6 +371,94 @@ class WebCrawlCollector(BaseCollector):
             if content:
                 hints.append(f"meta generator: {content}")
         return hints
+
+    # ── discovery files (sitemap, security.txt, .well-known…) ────────────────
+
+    async def _discover(self, client: httpx.AsyncClient, robots: _Robots,
+                        robots_response: httpx.Response, target: OsintTarget) -> list[Finding]:
+        """Fetch the discovery files robots.txt allows, report the ones that really are one."""
+        queue = [(kind, f"https://{target.domain}{path}")
+                 for kind, paths in DISCOVERY_PATHS.items() for path in paths]
+        if robots_response.status_code == 200:                    # sitemaps robots.txt points to
+            _, declared = parse_robots_rules(robots_response.text[:_ROBOTS_MAX_BYTES])
+            known = {url for _, url in queue}
+            extra = [u for u in declared if u not in known and self._in_scope(u, target.domain)]
+            queue += [("sitemap", u) for u in extra[:_MAX_DECLARED_SITEMAPS]]
+
+        findings: list[Finding] = []
+        reported: set[str] = set()
+        fetched_urls: set[str] = set()               # final URLs already read (after redirects)
+        for kind, url in queue:
+            if kind in reported and kind != "sitemap":            # security.txt: first location wins
+                continue
+            if url in fetched_urls or not robots.allowed(url):
+                continue
+            fetched = await self._fetch_capped(client, url)
+            await asyncio.sleep(robots.delay())
+            if fetched is None or fetched[0] != 200:
+                continue
+            if fetched[1] in fetched_urls:                        # a redirect to a file we already have
+                continue
+            fetched_urls.update({url, fetched[1]})
+            parsed = PARSERS[kind](fetched[2])                    # None: a 200 that is not that file
+            if parsed is not None and (finding := build_finding(kind, parsed, fetched[1], target, self.name)):
+                findings.append(finding)
+                reported.add(kind)
+        return findings
+
+    @staticmethod
+    async def _fetch_capped(client: httpx.AsyncClient, url: str) -> tuple[int, str, str] | None:
+        """(status, final URL, text) reading at most MAX_BYTES; None if the request failed."""
+        try:
+            async with client.stream("GET", url) as resp:
+                body = b""
+                async for chunk in resp.aiter_bytes():
+                    body += chunk
+                    if len(body) >= MAX_BYTES:
+                        break
+                return resp.status_code, str(resp.url), body[:MAX_BYTES].decode("utf-8", "replace")
+        except Exception as exc:                                  # dead or slow: skip, like a page
+            logger.debug("Discovery fetch failed %s: %s", url, exc)
+            return None
+
+    # ── robots.txt as a finding ──────────────────────────────────────────────
+
+    def _robots_finding(self, resp: httpx.Response, target: OsintTarget) -> Finding | None:
+        """One finding listing the Disallow rules of a robots.txt (None if there are none)."""
+        disallowed, sitemaps = parse_robots_rules(resp.text[:_ROBOTS_MAX_BYTES])
+        if not disallowed:
+            return None
+        sensitive = [p for p in disallowed if _robots_path_score(p) >= _ROBOTS_SENSITIVE_SCORE]
+        n = len(disallowed)
+
+        title = f"robots.txt discloses {n} disallowed path{'s' if n != 1 else ''}"
+        if sensitive:
+            title += " — sensitive: " + ", ".join(sensitive[:3]) + (" …" if len(sensitive) > 3 else "")
+
+        shown = disallowed[:_ROBOTS_LISTED]
+        description = (
+            f"robots.txt lists {n} Disallow rule{'s' if n != 1 else ''}: paths the site asks "
+            "crawlers to stay away from, often worth a manual look. Prowl respects the file "
+            "and never requests them. Disallowed: " + ", ".join(shown)
+            + (f" … and {n - len(shown)} more" if n > len(shown) else "") + "."
+        )
+        if sensitive:
+            description += " Sensitive-looking: " + ", ".join(sensitive[:_ROBOTS_LISTED]) + "."
+        if sitemaps:
+            description += " Sitemaps: " + ", ".join(sitemaps[:5]) + "."
+
+        return Finding(
+            id="",
+            severity=Severity.MEDIUM if sensitive else Severity.INFO,
+            category=Category.WEB_FINDING,
+            title=title,
+            description=description,
+            affected_asset=target.domain,
+            source=self.name,
+            source_url=str(resp.url),
+            mitre_attack="T1594",           # Search Victim-Owned Websites
+            raw_data={"disallow": disallowed, "sensitive": sensitive, "sitemaps": sitemaps},
+        )
 
     # ── Findings factory ─────────────────────────────────────────────────────
 

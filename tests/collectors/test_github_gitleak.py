@@ -170,4 +170,4 @@ def test_metadata_and_registration(monkeypatch):
     c = GitLeakCollector()
     assert (c.name, c.tier, c.requires_api_key, c.request_delay) == ("GitLeak", 1, False, 0.5)
     assert c.skip_without_pivot is True and c.is_available() is True
-    assert [p.name for p in PERSON_COLLECTORS][2:4] == ["GitLeak", "WhatsMyName"]
+    assert [p.name for p in PERSON_COLLECTORS][3:5] == ["GitLeak", "WhatsMyName"]

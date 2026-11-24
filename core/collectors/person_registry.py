@@ -47,9 +47,17 @@ class PersonRegistry:
         self._visited: set[str] = set()
         self._all: list[OsintPerson] = []
 
+    @staticmethod
+    def _key(name: str) -> str:
+        return name.lower().strip().replace("-", " ")
+
+    def knows(self, name: str) -> bool:
+        """Has a person of this name already been registered?"""
+        return self._key(name) in self._visited
+
     def add(self, person: OsintPerson) -> bool:
         """Register person. Returns True if new, False if duplicate."""
-        key = person.full_name.lower().strip().replace("-", " ")
+        key = self._key(person.full_name)
         if not key or key in self._visited:
             return False
         self._visited.add(key)

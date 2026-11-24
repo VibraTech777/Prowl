@@ -13,6 +13,9 @@ Examples:
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import sys
 from pathlib import Path
 
 import click
@@ -85,7 +88,9 @@ def main(
     pivot: int = typer.Option(0, "--pivot",
         help="Person pivot depth (0 = disabled). For each person found, runs: GitHub "
              "profile, EmailFormat, GitLeak (real email from commits), WhatsMyName "
-             "(username across ~300 platforms). Rate-limited per source. "
+             "(username across ~300 platforms). With --pivot 2+ and a GITHUB_TOKEN, "
+             "also finds the colleagues of GitHub-confirmed persons and investigates "
+             "them at the next level. Rate-limited per source. "
              "WARNING: even --pivot 1 sends each login to ~300 external sites."),
     pivot_limit: int = typer.Option(25, "--pivot-limit",
         help="Max persons to pivot on per depth level."),
@@ -97,6 +102,7 @@ def main(
     """Run an OSINT reconnaissance scan against a target domain."""
 
     _validate_options(pivot, pivot_limit, depth, output)
+    _configure_logging()
 
     print_banner()
     _streamed.clear()
@@ -141,6 +147,22 @@ def main(
         _handle_export(report, output)
 
 
+def _configure_logging() -> None:
+    """Keep log records out of the terminal: errors are shown once, cleanly (✗ line + Collector Errors).
+
+    Without a handler Python prints every WARNING/ERROR record on stderr (retry traces, tracebacks, library
+    URLs) in the middle of the findings. PROWL_DEBUG=1 turns them back on, for troubleshooting.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    if os.environ.get("PROWL_DEBUG"):
+        logging.basicConfig(level=logging.DEBUG, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    else:
+        root.addHandler(logging.NullHandler())
+
+
 _MAX_LIVE_FINDINGS = 15   # per collector, live callback only
 
 _streamed: set[int] = set()   # findings already printed by _on_progress (by identity)
@@ -173,7 +195,7 @@ def _on_progress(message: str, finding=None) -> None:
         _stream_counts[finding.source] = shown + 1
     color = _SEVERITY_COLOR.get(sev, "white")
     line = Text(f"    {sev:8} ", style=color)
-    line.append(f"{finding.source:<12} ", style="dim")
+    line.append(f"{finding.source:<16}  ", style="dim")
     line.append(finding.title)
     if finding.source_url and finding.source in _DETAIL_SOURCES:   # profile URLs, not API queries
         line.append("  ")

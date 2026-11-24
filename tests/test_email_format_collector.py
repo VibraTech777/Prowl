@@ -200,4 +200,4 @@ def test_metadata_and_registration():
     c = EmailFormatCollector()
     assert (c.name, c.tier, c.requires_api_key, c.request_delay) == ("EmailFormat", 1, False, 1.0)
     assert c.is_available() is True
-    assert [p.name for p in PERSON_COLLECTORS] == ["GitHub", "EmailFormat", "GitLeak", "WhatsMyName"]
+    assert [p.name for p in PERSON_COLLECTORS] == ["GitHub", "GitHub Colleagues", "EmailFormat", "GitLeak", "WhatsMyName"]

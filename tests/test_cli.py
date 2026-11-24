@@ -348,3 +348,40 @@ def test_error_after_streaming_is_still_reported(fake_run, monkeypatch):
     f = make_finding(title="partial", source="X")
     out = _stream(fake_run, monkeypatch, [f], finish=("X", [], RuntimeError("boom")))
     assert "partial" in out and "✗ X: boom" in out
+
+
+def test_log_records_never_reach_the_terminal(monkeypatch, capfd):
+    """Retry traces / tracebacks / library URLs must not land in the middle of the findings."""
+    import logging
+
+    async def noisy(target, selected=None, on_result=None, on_progress=None):
+        logging.getLogger("core.collectors.crtsh").warning("crt.sh attempt 1/2 failed (502 Bad Gateway)")
+        logging.getLogger("core.runner").error("Collector crt.sh raised an unhandled exception")
+        return make_report(target=target)
+
+    monkeypatch.delenv("PROWL_DEBUG", raising=False)
+    monkeypatch.setattr(cli_main, "run_osint", noisy)
+    runner.invoke(app, ["-d", "example.com", "--no-crawl"])
+    captured = capfd.readouterr()
+    assert "Bad Gateway" not in captured.err + captured.out and "unhandled exception" not in captured.err + captured.out
+
+
+def test_prowl_debug_brings_the_log_records_back(monkeypatch):
+    import logging
+
+    async def noisy(target, selected=None, on_result=None, on_progress=None):
+        logging.getLogger("core.runner").error("Collector X raised an unhandled exception")
+        return make_report(target=target)
+
+    monkeypatch.setenv("PROWL_DEBUG", "1")
+    monkeypatch.setattr(cli_main, "run_osint", noisy)
+    result = runner.invoke(app, ["-d", "example.com", "--no-crawl"])
+    assert "unhandled exception" in result.output
+
+
+def test_source_name_never_runs_into_the_title_of_a_live_finding(fake_run, monkeypatch):
+    runner.invoke(app, ["-d", "example.com"])
+    rec = _capture(monkeypatch)
+    fake_run["on_progress"]("", make_finding(Severity.INFO, title="Historic subdomain", source="Wayback Machine"))
+    import re
+    assert re.search(r"Wayback Machine {2,}Historic subdomain", rec.export_text())     # never glued together

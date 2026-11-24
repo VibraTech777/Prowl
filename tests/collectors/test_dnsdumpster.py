@@ -133,5 +133,5 @@ def test_metadata_and_registration():
     c = DnsDumpsterCollector()
     assert (c.tier, c.requires_api_key, c.french_only, c.request_delay) == (1, False, False, 1.0)
     names = [x.name for x in ALL_COLLECTORS]
-    assert names == ["DNS", "WHOIS", "crt.sh", "DNSDumpster", "GitHub Org", "OpenCorporates",
-                     "BODACC", "Pappers.fr", "Web Crawler", "Annuaire Entreprises", "Hunter.io"]
+    assert names == ["DNS", "WHOIS", "crt.sh", "DNSDumpster", "Google Dorks", "GitHub Org", "OpenCorporates",
+                     "BODACC", "Pappers.fr", "Web Crawler", "Annuaire Entreprises", "Hunter.io", "Wayback Machine"]

@@ -157,9 +157,9 @@ async def _run_osint(
                           "(~5 persons/hr). Set GITHUB_TOKEN in .env for full coverage.")
             if target.pivot_depth >= 2:       # only when requests are really going to be sent
                 _announce(on_progress, "INFO",
-                          f"--pivot {target.pivot_depth} enabled — deepens recon on discovered "
-                          "persons (requires additional person discovery sources for full "
-                          "recursion).")
+                          f"--pivot {target.pivot_depth}: persons discovered at one level are "
+                          "investigated at the next (GitHub colleagues of confirmed GitHub accounts; "
+                          "needs GITHUB_TOKEN).")
             pivot_findings = await _run_person_pivot(
                 target, registry.all, registry, 1, on_result, errors, pivot_stats,
                 on_progress=on_progress,
@@ -360,8 +360,13 @@ async def _run_person_pivot(
 
     available = [c for c in PERSON_COLLECTORS if c.is_available()]
 
+    for collector in available:
+        collector.is_known = registry.knows        # lets a discovering collector skip known people
+
     for person in persons:
         for collector in available:
+            if not collector.applies_to(person, target):    # nothing to do for this person: no line
+                continue
             await asyncio.sleep(collector.request_delay)   # stealth / rate limit
             label = f"{collector.name} → {person.full_name}"
             st = stats.setdefault(collector.name, {"calls": 0, "errors": 0})

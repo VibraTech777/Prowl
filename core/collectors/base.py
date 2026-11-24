@@ -130,6 +130,14 @@ class BasePersonCollector(_Progress, ABC):
     api_key_env: str = ""
     request_delay: float = 1.5   # seconds to sleep before each call
 
+    # Set by the runner before each person: "is this name already in the person registry?". A collector
+    # that DISCOVERS persons (colleagues…) uses it to skip people another source already found.
+    is_known: Callable[[str], bool] = staticmethod(lambda name: False)
+
+    def applies_to(self, person: OsintPerson, target: OsintTarget) -> bool:
+        """False → the runner skips this collector for this person, silently (no "0 findings" line)."""
+        return True
+
     def is_available(self) -> bool:
         if not self.requires_api_key:
             return True

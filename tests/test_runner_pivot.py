@@ -410,15 +410,14 @@ async def test_phase2_findings_not_deduplicated_against_phase1(monkeypatch):
 
 # ── pivot warnings only when the pivot really runs ───────────────────────────
 
-RECURSIVE = "enabled — deepens recon on discovered persons"
+RECURSIVE = "persons discovered at one level are investigated at the next"
 SKIPPED = "[INFO] --pivot enabled but no persons found in Phase 1 — pivot skipped."
 
 
 async def test_recursive_warning_printed_when_pivot_2_runs(monkeypatch, capsys):
     _setup(monkeypatch, [P("Alice Martin")], _PersonCollector("X"))
     _, err = await _run(_target(2), capsys)
-    assert f"[INFO] --pivot 2 {RECURSIVE}" in err
-    assert "additional person discovery sources" in err and "[WARNING] --pivot" not in err
+    assert f"[INFO] --pivot 2: {RECURSIVE}" in err and "[WARNING] --pivot" not in err
     assert SKIPPED not in err
 
 
@@ -529,3 +528,57 @@ async def test_on_progress_is_cleared_even_if_the_run_fails(monkeypatch):
     with pytest.raises(RuntimeError):
         await runner.run_osint(_target(1), on_progress=lambda m, f=None: None)
     assert pc.on_progress is None
+
+
+# ── collectors that choose their persons (applies_to) and discover colleagues ────────────────────
+
+
+class _Selective(_PersonCollector):
+    """Only for persons with a confirmed login; discovers 'colleagues' like GitHub Colleagues does."""
+
+    def applies_to(self, person, target):
+        return bool(person.github_login) and person.depth_found < target.pivot_depth
+
+
+async def test_a_collector_that_does_not_apply_is_skipped_silently(monkeypatch, capsys):
+    plain, selective = _PersonCollector("plain"), _Selective("sel")
+    _setup(monkeypatch, [P("Alice Martin")], plain, selective)
+    notified = []
+    report = await runner.run_osint(_target(2), on_result=lambda n, f, e: notified.append(n))
+    capsys.readouterr()
+    assert plain.calls == ["Alice Martin"] and selective.calls == []
+    assert not any(n.startswith("sel") for n in notified)               # no "0 findings" line either
+    assert "sel" not in report.errors
+
+
+async def test_colleagues_found_at_level_1_are_investigated_at_level_2(monkeypatch, capsys):
+    alice = OsintPerson(full_name="Alice Martin", source="t", github_login="alice", depth_found=1)
+    bob = OsintPerson(full_name="Bob Durand", source="t", github_login="bob", depth_found=2)
+    sel = _Selective("sel", script={"Alice Martin": [bob]})
+    other = _PersonCollector("other")
+    _setup(monkeypatch, [alice], sel, other)
+    report, _ = await _run(_target(2), capsys)
+    assert sel.calls == ["Alice Martin"]            # Bob is level 2 = the last: nothing left to discover for
+    assert other.calls == ["Alice Martin", "Bob Durand"]
+    assert {p.full_name for p in report.persons} == {"Alice Martin", "Bob Durand"}
+
+
+async def test_with_pivot_1_colleagues_are_not_searched_for(monkeypatch, capsys):
+    alice = OsintPerson(full_name="Alice Martin", source="t", github_login="alice", depth_found=1)
+    sel = _Selective("sel")
+    _setup(monkeypatch, [alice], sel)
+    await _run(_target(1), capsys)
+    assert sel.calls == []                           # its results could not be pivoted on
+
+
+async def test_the_runner_tells_collectors_who_is_already_known(monkeypatch, capsys):
+    seen = {}
+
+    class _Probe(_PersonCollector):
+        async def collect_person(self, person, target):
+            seen[person.full_name] = (self.is_known("Alice Martin"), self.is_known("Zed Nobody"))
+            return await super().collect_person(person, target)
+
+    _setup(monkeypatch, [P("Alice Martin")], _Probe("probe"))
+    await _run(_target(1), capsys)
+    assert seen == {"Alice Martin": (True, False)}

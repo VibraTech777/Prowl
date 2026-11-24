@@ -50,15 +50,15 @@ async def test_retries_then_succeeds(respx_mock, target):
 
 async def test_permanent_failure_raises(respx_mock, target):
     route = respx_mock.get(url__regex=CRT_URL).respond(502)
-    with pytest.raises(RuntimeError, match="unreachable after 2 attempts"):
+    with pytest.raises(RuntimeError, match="unreachable after 3 attempts"):
         await CrtshCollector().collect(target)
-    assert route.call_count == 2
+    assert route.call_count == 3
 
 
 def test_retry_budget_is_bounded():
-    # worst case dead wait ≈ attempts × timeout + backoff ≈ 2×10 + 2 = 22s
-    assert crtsh._MAX_RETRIES == 2
-    assert crtsh._REQUEST_TIMEOUT == 10
+    # worst case dead wait ≈ attempts × timeout + backoff ≈ 3×45 + 15 = 150s (phase 1 runs concurrently)
+    assert crtsh._MAX_RETRIES == 3
+    assert crtsh._REQUEST_TIMEOUT == 45
 
 
 async def test_network_error_also_raises(respx_mock, target):

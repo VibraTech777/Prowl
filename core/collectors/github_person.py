@@ -213,6 +213,10 @@ class GitHubPersonCollector(BasePersonCollector):
             org = person.github_org if confirmed else ""
             matches_company = self._company_matches(profile.get("company"), target, org)
             name_only = "" if confirmed else f" {_NAME_ONLY_NOTE}"
+            if matches_company and not confirmed and not person.github_login:
+                # a profile whose company field names the target: good enough to build on (GitHub
+                # Colleagues, WhatsMyName). Remembered on the person; the finding stays INFO.
+                person.github_login = login
 
             self._add(findings, Finding(
                 id="",
