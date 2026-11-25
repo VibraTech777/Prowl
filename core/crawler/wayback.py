@@ -30,10 +30,19 @@ SENSITIVE_EXTS = frozenset({
 # server-side CDX filter (Java regex): files OR API-looking paths, one request for both
 FILES_API_FILTER = (
     r"original:.*(\.(" + "|".join(sorted(DOC_EXTS | SENSITIVE_EXTS)) + r")(\?.*)?$"
-    r"|/api/|/v[0-9]+/|/graphql|/rest/|/wp-json|/swagger|/openapi|/oauth).*"
+    r"|/api/|/v[0-9]+/|/graphql|/rest/|/wp-json|/swagger|/openapi|/oauth"
+    r"|://[^/]*:[0-9]+(/|$)).*"            # an explicit port: a service on a non-standard port
 )
 TEAM_QUERY_PATHS = ("team", "our-team", "about", "about-us", "leadership", "people", "company", "equipe",
                     "a-propos", "management", "staff", "who-we-are")
+
+# Ports that usually mean a management, data or developer service, not a second website.
+NOTABLE_PORTS = {
+    2375: "Docker API", 2376: "Docker API (TLS)", 3000: "Grafana / dev server", 5000: "dev server",
+    5601: "Kibana", 8086: "InfluxDB", 8161: "ActiveMQ console", 8500: "Consul", 8888: "Jupyter",
+    9000: "SonarQube / Portainer", 9090: "Prometheus", 9200: "Elasticsearch", 10000: "Webmin",
+    15672: "RabbitMQ management",
+}
 
 _API_PATH_RE = re.compile(r"/(api|rest|graphql|wp-json|swagger|openapi|oauth)(/|$)|/v\d+(/|$)", re.I)
 TEAM_PATH_RE = re.compile(
@@ -58,6 +67,17 @@ class Capture:
     @property
     def path(self) -> str:
         return urlparse(self.original).path or "/"
+
+    @property
+    def port(self) -> int | None:
+        """The explicit port of the URL when it is NOT the scheme's default (80 / 443), else None."""
+        parsed = urlparse(self.original)
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        default = 443 if parsed.scheme == "https" else 80
+        return port if port is not None and port != default else None
 
 
 def parse_cdx(text: str) -> list[Capture]:
@@ -111,6 +131,7 @@ class Inventory:
     api_paths: dict[str, Capture] = field(default_factory=dict)    # "host/api/v1/" → newest capture
     sensitive_files: list[Capture] = field(default_factory=list)   # newest capture per URL
     documents: list[Capture] = field(default_factory=list)
+    ports: dict[str, Capture] = field(default_factory=dict)        # "host:8443" → newest capture
 
 
 def build_inventory(captures: list[Capture], domain: str) -> Inventory:
@@ -122,6 +143,8 @@ def build_inventory(captures: list[Capture], domain: str) -> Inventory:
             continue
         if host not in (domain, "www." + domain):
             _keep_newest(inv.subdomains, host, c)
+        if (port := c.port) is not None:
+            _keep_newest(inv.ports, f"{host}:{port}", c)
         if _API_PATH_RE.search(c.path) and c.path.lstrip("/").split("/", 1)[0].lower() not in _STATIC_SEGMENTS:
             _keep_newest(inv.api_paths, host + _api_root(c.path), c)
         ext = extension(c.path)

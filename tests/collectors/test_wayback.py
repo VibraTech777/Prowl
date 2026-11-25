@@ -373,3 +373,43 @@ async def test_team_variants_of_one_path_are_one_history(respx_mock):
                  "20230101000000": (team_page(("Jane Doe", "CTO")), {})})
     _, persons = await _run()
     assert [p.full_name for p in persons] == ["Ann Old"]
+
+
+# ── non-standard ports ───────────────────────────────────────────────────────
+
+
+async def test_non_standard_ports_become_one_finding_with_a_crawler_hint(respx_mock):
+    _site(respx_mock, inventory=[("20190101000000", "http://example.com:8080/a", "text/html"),
+                                 ("20180101000000", "https://app.example.com:8443/", "text/html"),
+                                 ("20190101000000", "https://example.com/", "text/html"),
+                                 ("20190101000000", "http://example.com:80/", "text/html")])
+    findings, _ = await _run()
+    (f,) = [f for f in findings if f.title.startswith("Non-standard ports")]
+    assert f.title == "Non-standard ports seen in the Wayback Machine: 2" and f.severity is Severity.INFO
+    assert "example.com:8080 (2019)" in f.description and "app.example.com:8443 (2018)" in f.description
+    assert "prowl -d example.com --port 8080" in f.description and "NOT checked" in f.description
+    assert f.category is Category.WEB_FINDING and f.raw_data["ports"]["example.com:8080"] == "20190101000000"
+
+
+async def test_a_management_service_port_makes_it_medium_and_is_named_in_the_title(respx_mock):
+    _site(respx_mock, subs=[("20200101000000", "http://es.example.com:9200/_cat", "application/json"),
+                            ("20190101000000", "http://example.com:8080/", "text/html")])
+    findings, _ = await _run()
+    (f,) = [f for f in findings if f.title.startswith("Non-standard ports")]
+    assert f.severity is Severity.MEDIUM and f.title.endswith("— notable: es.example.com:9200 (Elasticsearch)")
+
+
+async def test_no_port_no_finding(respx_mock):
+    _site(respx_mock, inventory=[("20190101000000", "https://example.com/", "text/html")])
+    findings, _ = await _run()
+    assert not [f for f in findings if f.title.startswith("Non-standard ports")]
+
+
+async def test_ports_from_the_slow_query_are_added_without_repeating_the_first_ones(respx_mock):
+    _site(respx_mock, inventory=[("20190101000000", "http://example.com:8080/", "text/html")],
+          files=[("20190101000000", "http://example.com:8080/x", "text/html"),
+                 ("20200101000000", "http://old.example.com:8081/api/v1/u", "application/json")])
+    findings, _ = await _run()
+    titles = [f.title for f in findings if f.title.startswith("Non-standard ports")]
+    assert titles == ["Non-standard ports seen in the Wayback Machine: 1",
+                      "Non-standard ports seen in the Wayback Machine: 1 more"]

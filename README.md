@@ -33,6 +33,9 @@ prowl -d acme.com
 # Without the web crawler: never contacts the target's web servers
 prowl -d acme.com --no-crawl
 
+# Crawl a web service on a non-standard port
+prowl -d acme.com --port 8080
+
 # French company — adds BODACC, Annuaire Entreprises, Pappers
 prowl -d acme.fr --french --siren 123456789
 
@@ -59,6 +62,7 @@ prowl -d acme.fr --french --siren 123456789 --company "Acme SAS" --pivot 1 --out
 | `--pivot N` | Pivot on discovered persons (`0` = disabled, the default; `1` = one level). Sources: GitHub, EmailFormat, GitLeak, WhatsMyName; from level 2 (`--pivot 2`), GitHub Colleagues⁸ |
 | `--pivot-limit N` | Max persons to pivot on per level (default: 25) |
 | `--depth N` | Web crawler depth (default: 1). No effect with `--no-crawl` |
+| `--port N` | Web crawler port, e.g. `8080` or `8443` (1–65535). `https` is tried first, then `http`; links to other ports are not followed. No effect with `--no-crawl`. Ports seen in the Wayback Machine are listed as leads |
 | `--crawl / --no-crawl` | Web crawler, on by default. `--no-crawl` disables it and keeps the scan passive |
 | `-m, --mode` | `short` (default) or `deep`. Collector tier filter — currently all collectors are Tier 1, so both behave the same |
 | `-o, --output FILE` | Save report as `.json` or `.pdf` |
@@ -101,7 +105,7 @@ GitHub Person, GitHub Colleagues⁸, Email Format, GitLeak, WhatsMyName
 
 Prowl always respects `robots.txt`. No `--ignore-robots` flag exists by design. The `Disallow` rules it finds are reported as a finding (MEDIUM if a path looks sensitive, INFO otherwise) — listed for you to review, never requested. The crawler also reads the files a site publishes about itself — `sitemap.xml` (and the sitemaps `robots.txt` declares), `security.txt`, OpenID Connect configuration, Android/Apple app-link files, `humans.txt`, `crossdomain.xml` — only where `robots.txt` allows, and reports what they reveal (URL structure, contacts, auth endpoints, mobile apps) without requesting the URLs they list.
 
-The Wayback Machine collector queries archive.org, not the target's web servers (it only looks the old subdomains up in DNS to tell whether they still resolve). It reports subdomains that no longer resolve, old API endpoints (`/api/v1/`…), archived sensitive files (backups, configs, dumps) and documents, a technology history of the homepage, and people listed on old `/team` or `/about` pages who are missing from the latest snapshot ("possible former employee"). Those names feed the person pivot as leads, not as facts: a person can be absent from a page for reasons unrelated to leaving.
+The Wayback Machine collector queries archive.org, not the target's web servers (it only looks the old subdomains up in DNS to tell whether they still resolve). It reports subdomains that no longer resolve, old API endpoints (`/api/v1/`…), services once archived on non-standard ports (leads for `--port`; management ports such as 9200 or 5601 are MEDIUM), archived sensitive files (backups, configs, dumps) and documents, a technology history of the homepage, and people listed on old `/team` or `/about` pages who are missing from the latest snapshot ("possible former employee"). Those names feed the person pivot as leads, not as facts: a person can be absent from a page for reasons unrelated to leaving.
 
 Errors never interrupt the findings: a source that fails is listed once in a "Collector Errors" panel at the end, and internal log messages are hidden. Set `PROWL_DEBUG=1` to print them for troubleshooting.
 

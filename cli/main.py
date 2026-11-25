@@ -42,7 +42,7 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _validate_options(pivot: int, pivot_limit: int, depth: int, output: str) -> None:
+def _validate_options(pivot: int, pivot_limit: int, depth: int, output: str, port: int | None = None) -> None:
     """Reject bad values up front: before the banner and long before the scan starts."""
     if pivot < 0:
         raise typer.BadParameter("Pivot depth must be 0 or greater.", param_hint="--pivot")
@@ -50,6 +50,8 @@ def _validate_options(pivot: int, pivot_limit: int, depth: int, output: str) -> 
         raise typer.BadParameter("Pivot limit must be at least 1.", param_hint="--pivot-limit")
     if depth < 0:
         raise typer.BadParameter("Crawler depth must be 0 or greater.", param_hint="--depth")
+    if port is not None and not 1 <= port <= 65535:
+        raise typer.BadParameter("Port must be between 1 and 65535.", param_hint="--port")
     if output and Path(output).suffix.lower() not in _EXPORT_SUFFIXES:
         raise typer.BadParameter(
             f"Unknown export format '{Path(output).suffix}'. Use .json or .pdf.",
@@ -85,6 +87,11 @@ def main(
              "On by default; --no-crawl keeps the scan passive."),
     depth: int = typer.Option(1, "--depth",
         help="Link-following depth of the web crawler. Has no effect with --no-crawl."),
+    port: int = typer.Option(None, "--port",
+        help="Port of the web crawler (e.g. 8080, 8443). https is tried first, then http. "
+             "Default: the scheme's own port. Has no effect with --no-crawl. The "
+             "Wayback Machine collector lists non-standard ports seen in the archives, "
+             "as leads for this option."),
     pivot: int = typer.Option(0, "--pivot",
         help="Person pivot depth (0 = disabled). For each person found, runs: GitHub "
              "profile, EmailFormat, GitLeak (real email from commits), WhatsMyName "
@@ -101,7 +108,7 @@ def main(
 ) -> None:
     """Run an OSINT reconnaissance scan against a target domain."""
 
-    _validate_options(pivot, pivot_limit, depth, output)
+    _validate_options(pivot, pivot_limit, depth, output, port)
     _configure_logging()
 
     print_banner()
@@ -125,6 +132,7 @@ def main(
         french=french,
         crawl=crawl,
         crawl_depth=depth,
+        crawl_port=port,
         pivot_depth=pivot,
         pivot_limit=pivot_limit,
     )

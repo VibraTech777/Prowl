@@ -91,6 +91,7 @@ class OsintTarget:
     french:        bool        = False    # Enables French-specific sources
     crawl:         bool        = False    # visit discovered HTTP pages (the CLI turns it on by default)
     crawl_depth:   int         = 1
+    crawl_port:    int | None  = None     # web crawler port (None = the scheme's default)
     pivot_depth:   int         = 0        # person pivot: 0 = disabled
     pivot_limit:   int         = 25       # max persons pivoted on per depth level
 

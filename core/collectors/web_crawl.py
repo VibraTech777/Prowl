@@ -146,9 +146,9 @@ class WebCrawlCollector(BaseCollector):
     requires_crawl = True   # excluded by _matches_mode unless target.crawl (CLI: on, --no-crawl)
 
     async def collect(self, target: OsintTarget) -> CollectorResult:
-        seed_url = f"https://{target.domain}"
         findings: list[Finding] = []
         self._progress("[Web Crawler] Starting scan — this may take a while...")
+        seeds = self._seeds(target)
 
         async with httpx.AsyncClient(
             headers={"User-Agent": _USER_AGENT},
@@ -157,7 +157,17 @@ class WebCrawlCollector(BaseCollector):
             verify=False,   # target may have self-signed cert
         ) as client:
 
-            robots, robots_response = await self._load_robots(client, seed_url)
+            for i, seed_url in enumerate(seeds):
+                try:
+                    robots, robots_response = await self._load_robots(client, seed_url)
+                    break
+                except RuntimeError as exc:
+                    # a custom port may speak plain HTTP: only a connection / TLS failure (no answer
+                    # at all) justifies trying the next scheme, never an HTTP error status
+                    if i + 1 < len(seeds) and isinstance(exc.__cause__, httpx.HTTPError):
+                        self._progress(f"[Web Crawler] {seed_url} did not answer — trying {seeds[i + 1]}")
+                        continue
+                    raise
             if not robots.allowed(f"{seed_url}/"):
                 raise CollectorSkipped("robots.txt disallows crawling this site")
 
@@ -165,7 +175,7 @@ class WebCrawlCollector(BaseCollector):
 
             # Probe sensitive paths regardless of link presence (robots.txt still applies)
             for path in _PROBE_PATHS:
-                url = f"https://{target.domain}{path}"
+                url = f"{seed_url}{path}"
                 if url in {p.url for p in pages} or not robots.allowed(url):
                     continue
                 if path == "/robots.txt":
@@ -178,7 +188,7 @@ class WebCrawlCollector(BaseCollector):
                     pages.append(page)
                 await asyncio.sleep(robots.delay())
 
-            discovered = await self._discover(client, robots, robots_response, target)
+            discovered = await self._discover(client, robots, robots_response, target, seed_url)
 
         if robots.blocked:
             logger.info("Web Crawler: %d URL(s) skipped (robots.txt)", robots.blocked)
@@ -257,7 +267,7 @@ class WebCrawlCollector(BaseCollector):
         # Enqueue seed's links for BFS (only if the crawl goes below depth 0)
         if target.crawl_depth >= 1:
             for link in seed_page.links:
-                if link not in visited and self._in_scope(link, target.domain):
+                if link not in visited and self._in_scope(link, target.domain, target.crawl_port):
                     queue.append((link, 1))
 
         while queue and len(pages) < _MAX_PAGES:
@@ -277,7 +287,7 @@ class WebCrawlCollector(BaseCollector):
 
             if depth < target.crawl_depth:
                 for link in page.links:
-                    if link not in visited and self._in_scope(link, target.domain):
+                    if link not in visited and self._in_scope(link, target.domain, target.crawl_port):
                         queue.append((link, depth + 1))
 
         return pages
@@ -375,14 +385,16 @@ class WebCrawlCollector(BaseCollector):
     # ── discovery files (sitemap, security.txt, .well-known…) ────────────────
 
     async def _discover(self, client: httpx.AsyncClient, robots: _Robots,
-                        robots_response: httpx.Response, target: OsintTarget) -> list[Finding]:
+                        robots_response: httpx.Response, target: OsintTarget,
+                        seed_url: str | None = None) -> list[Finding]:
         """Fetch the discovery files robots.txt allows, report the ones that really are one."""
-        queue = [(kind, f"https://{target.domain}{path}")
+        seed_url = seed_url or f"https://{target.domain}"
+        queue = [(kind, f"{seed_url}{path}")
                  for kind, paths in DISCOVERY_PATHS.items() for path in paths]
         if robots_response.status_code == 200:                    # sitemaps robots.txt points to
             _, declared = parse_robots_rules(robots_response.text[:_ROBOTS_MAX_BYTES])
             known = {url for _, url in queue}
-            extra = [u for u in declared if u not in known and self._in_scope(u, target.domain)]
+            extra = [u for u in declared if u not in known and self._in_scope(u, target.domain, target.crawl_port)]
             queue += [("sitemap", u) for u in extra[:_MAX_DECLARED_SITEMAPS]]
 
         findings: list[Finding] = []
@@ -569,10 +581,29 @@ class WebCrawlCollector(BaseCollector):
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _in_scope(url: str, domain: str) -> bool:
-        """True if url's hostname is the target domain or a subdomain."""
+    def _seeds(target: OsintTarget) -> list[str]:
+        """Start URLs to try, in order. No port: https as always. 443 / 80: that scheme only. Any other
+        port: https first, then plain http (a service on 8080 or 8000 often does not speak TLS)."""
+        port = target.crawl_port
+        if port is None:
+            return [f"https://{target.domain}"]
+        if port == 443:
+            return [f"https://{target.domain}"]
+        if port == 80:
+            return [f"http://{target.domain}"]
+        return [f"https://{target.domain}:{port}", f"http://{target.domain}:{port}"]
+
+    @staticmethod
+    def _in_scope(url: str, domain: str, port: int | None = None) -> bool:
+        """True if url's hostname is the target domain or a subdomain — and, when a crawl port was
+        asked for, if the URL is on that port (a link to the same host on another port is not followed)."""
         try:
-            host = urlparse(url).netloc.lower().split(":")[0]
-            return host == domain or host.endswith("." + domain)
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            if not (host == domain or host.endswith("." + domain)):
+                return False
+            if port is None:
+                return True
+            return (parsed.port or (443 if parsed.scheme == "https" else 80)) == port
         except Exception:
             return False

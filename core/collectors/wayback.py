@@ -7,8 +7,9 @@ the CDX index and a handful of archived pages:
 
   • who used to be on the team?   old /team, /about … pages: names absent from the newest snapshot
                                   become "possible former employees" AND OsintPerson (→ pivot);
-  • what used to exist?           subdomains (checked in DNS: gone or still alive) and /api/v1/-style
-                                  endpoint families that were once indexed;
+  • what used to exist?           subdomains (checked in DNS: gone or still alive), /api/v1/-style
+                                  endpoint families and services once indexed on non-standard ports
+                                  (a lead for the crawler's --port);
   • which files were exposed?     PDFs and documents, and configs / backups / logs / archives;
   • which stack did it run?       server / framework / CMS / library fingerprints of old homepages.
 
@@ -35,7 +36,7 @@ from core.collectors.base import BaseCollector, CollectorSkipped
 from core.crawler.link_scorer import score_url
 from core.crawler.wayback import (
     FILES_API_FILTER, SENSITIVE_EXTS, TEAM_PATH_RE, TEAM_QUERY_PATHS, Capture, Inventory,
-    archive_url, build_inventory, extension, extract_people, extract_tech, fold, in_scope, parse_cdx,
+    NOTABLE_PORTS, archive_url, build_inventory, extension, extract_people, extract_tech, fold, in_scope, parse_cdx,
     pick_spread,
 )
 from core.models import (
@@ -139,12 +140,15 @@ class WaybackCollector(BaseCollector):
         inv = build_inventory(early_caps, domain)
         shown = {c for c in inv.subdomains}
         self._add_all(findings, await self._subdomain_findings(inv, domain))
+        shown_ports = set(inv.ports)
+        self._add_all(findings, self._port_findings(inv, domain))
         self._progress(f"[Wayback Machine] inventory read: {len(early_caps)} archived URLs, "
                        f"{len(shown)} subdomains; looking for old APIs and files...")
 
         everything = early_caps + await self._gather("files and APIs", [files_task], problems, ok)
         inv = build_inventory(everything, domain)
         self._add_all(findings, await self._subdomain_findings(inv, domain, skip=shown))   # new hosts only
+        self._add_all(findings, self._port_findings(inv, domain, skip=shown_ports))     # new ports only
         self._add_all(findings, self._endpoint_findings(inv, everything, domain))
         self._add_all(findings, self._file_findings(inv, domain))
 
@@ -248,6 +252,31 @@ class WaybackCollector(BaseCollector):
                 f"{host} was archived (last capture {cap.year}). {note}", host, cap,
                 {"host": host, "last_capture": cap.timestamp, "dns": state}))
         return findings
+
+    # ── non-standard ports ──────────────────────────────────────────────────
+
+    def _port_findings(self, inv: Inventory, domain: str, skip: set[str] = frozenset()) -> list[Finding]:
+        """One finding: services once indexed on a port other than 80 / 443 (a lead for --port)."""
+        items = sorted(((key, cap) for key, cap in inv.ports.items() if key not in skip),
+                       key=lambda kv: (kv[1].port not in NOTABLE_PORTS, -int(kv[1].timestamp[:8]), kv[0]))
+        if not items:
+            return []
+        notable = [(key, cap) for key, cap in items if cap.port in NOTABLE_PORTS]
+        title = (f"Non-standard ports seen in the Wayback Machine: {len(items)}"
+                 + (" more" if skip else ""))
+        if notable:
+            title += " — notable: " + ", ".join(f"{k} ({NOTABLE_PORTS[c.port]})" for k, c in notable[:3]) \
+                + (" …" if len(notable) > 3 else "")
+        listed = ", ".join(f"{key} ({cap.year})" for key, cap in items[:_LISTED])
+        more = f" … and {len(items) - _LISTED} more" if len(items) > _LISTED else ""
+        first_port = items[0][1].port
+        return [self._finding(
+            Category.WEB_FINDING, Severity.MEDIUM if notable else Severity.INFO, title,
+            f"Web pages were archived on non-standard ports (last capture year): {listed}{more}. Such "
+            "services are often less hardened (admin consoles, dev or internal tools). Whether they "
+            "still answer was NOT checked; a lead for the web crawler, e.g. "
+            f"`prowl -d {domain} --port {first_port}`.",
+            domain, items[0][1], {"ports": {k: c.timestamp for k, c in items}})]
 
     # ── endpoints, files ────────────────────────────────────────────────────
 

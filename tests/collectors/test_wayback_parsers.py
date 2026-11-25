@@ -132,3 +132,32 @@ def test_static_asset_version_folders_are_not_api_families():
             w.Capture("20190101000000", "https://example.com/hubfs/v2/x.css", "text/css"),
             w.Capture("20190101000000", "https://example.com/api/v1/users", "application/json")]
     assert list(w.build_inventory(caps, "example.com").api_paths) == ["example.com/api/v1/"]
+
+
+@pytest.mark.parametrize("url, port", [
+    ("https://example.com/", None), ("http://example.com:80/", None), ("https://example.com:443/x", None),
+    ("http://example.com:8080/", 8080), ("https://admin.example.com:8443/login", 8443),
+    ("http://example.com:443/", 443),            # the default of https, not of http
+    ("http://example.com:99999/", None),         # not a valid port: ignored, never an exception
+])
+def test_capture_port_is_only_a_non_default_one(url, port):
+    assert w.Capture("20190101000000", url).port == port
+
+
+def test_inventory_lists_non_standard_ports_with_their_newest_capture():
+    caps = [w.Capture("20170101000000", "http://example.com:8080/a"),
+            w.Capture("20200101000000", "http://example.com:8080/b"),
+            w.Capture("20180101000000", "https://admin.example.com:8443/"),
+            w.Capture("20190101000000", "https://example.com/"),
+            w.Capture("20190101000000", "http://evil.org:8080/"),              # out of scope
+            w.Capture("20190101000000", "http://example.com:80/")]
+    inv = w.build_inventory(caps, "example.com")
+    assert {k: c.timestamp for k, c in inv.ports.items()} == {
+        "example.com:8080": "20200101000000", "admin.example.com:8443": "20180101000000"}
+
+
+def test_the_files_query_also_catches_urls_with_a_port():
+    import re
+    rx = re.compile(w.FILES_API_FILTER.removeprefix("original:"))
+    assert rx.fullmatch("http://example.com:8080/") and rx.fullmatch("https://a.example.com:8443")
+    assert not rx.fullmatch("https://example.com/about")

@@ -385,3 +385,18 @@ def test_source_name_never_runs_into_the_title_of_a_live_finding(fake_run, monke
     fake_run["on_progress"]("", make_finding(Severity.INFO, title="Historic subdomain", source="Wayback Machine"))
     import re
     assert re.search(r"Wayback Machine {2,}Historic subdomain", rec.export_text())     # never glued together
+
+
+def test_port_is_mapped_to_the_target_and_listed_in_help(fake_run):
+    assert runner.invoke(app, ["-d", "example.com", "--port", "8080"]).exit_code == 0
+    assert fake_run["target"].crawl_port == 8080
+    assert runner.invoke(app, ["-d", "example.com"]).exit_code == 0
+    assert fake_run["target"].crawl_port is None
+    assert "--port" in runner.invoke(app, ["--help"]).output
+
+
+@pytest.mark.parametrize("bad", ["0", "70000", "-1"])
+def test_invalid_port_is_rejected_before_the_scan(fake_run, bad):
+    result = runner.invoke(app, ["-d", "example.com", "--port", bad])
+    assert result.exit_code != 0 and "Port must be between 1 and 65535" in result.output
+    assert "target" not in fake_run

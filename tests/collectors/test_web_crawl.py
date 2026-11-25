@@ -426,3 +426,80 @@ async def test_robots_finding_is_streamed_and_returned_once(respx_mock):
     result = await c.collect(_target(0))
     (f,) = _robots_findings(result)
     assert any(s is f for s in streamed)
+
+
+# ── --port ───────────────────────────────────────────────────────────────────
+
+
+def _port_target(port, depth=1):
+    return OsintTarget(company_name="", domain="example.com", crawl=True, crawl_depth=depth, crawl_port=port)
+
+
+@pytest.mark.parametrize("port, seeds", [
+    (None, ["https://example.com"]),
+    (443, ["https://example.com"]),
+    (80, ["http://example.com"]),
+    (8080, ["https://example.com:8080", "http://example.com:8080"]),
+])
+def test_seeds_depend_on_the_port(port, seeds):
+    assert WebCrawlCollector._seeds(_port_target(port)) == seeds
+
+
+def test_in_scope_is_limited_to_the_asked_port():
+    f = WebCrawlCollector._in_scope
+    assert f("http://example.com:8080/a", "example.com", 8080)
+    assert f("http://sub.example.com:8080/a", "example.com", 8080)
+    assert not f("http://example.com:9090/a", "example.com", 8080)     # another service: not followed
+    assert not f("https://example.com/a", "example.com", 8080)         # the default port neither
+    assert f("https://example.com/a", "example.com", 443) and f("http://example.com/a", "example.com", 80)
+    assert f("https://example.com:9090/a", "example.com")              # no port asked: unchanged
+
+
+async def test_a_custom_port_that_speaks_http_falls_back_from_https(respx_mock):
+    respx_mock.get("https://example.com:8080/robots.txt").mock(side_effect=httpx.ConnectError("tls"))
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200 if request.url.path == "/" else 404, text=HOME if request.url.path == "/" else "nf",
+                              headers={"content-type": "text/html"})
+
+    respx_mock.route(host="example.com", port=8080).mock(side_effect=handler)
+    c = WebCrawlCollector()
+    notes: list[str] = []
+    c.on_progress = lambda message, finding=None: notes.append(message) if finding is None else None
+    result = await c.collect(_port_target(8080, depth=0))
+    assert result.findings
+    assert all(u.startswith("http://example.com:8080/") for u in seen)           # everything on that port
+    assert any("trying http://example.com:8080" in n for n in notes)
+
+
+async def test_an_http_error_status_never_triggers_the_scheme_fallback(respx_mock):
+    https = respx_mock.get("https://example.com:8443/robots.txt").respond(503)
+    plain = respx_mock.get("http://example.com:8443/robots.txt").respond(200)
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        await WebCrawlCollector().collect(_port_target(8443))
+    assert https.call_count == 1 and plain.call_count == 0
+
+
+async def test_nothing_answering_on_either_scheme_is_an_error(respx_mock):
+    respx_mock.route(host="example.com", port=8080).mock(side_effect=httpx.ConnectError("refused"))
+    with pytest.raises(RuntimeError, match="unreachable"):
+        await WebCrawlCollector().collect(_port_target(8080))
+
+
+async def test_links_to_other_ports_are_not_followed(respx_mock):
+    home = ('<html><body><a href="/about">a</a> <a href="http://example.com:9090/other">o</a>'
+            '<a href="https://example.com/default">d</a></body></html>')
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(200 if request.url.path in ("/", "/about") else 404,
+                              text=home if request.url.path == "/" else "<html></html>",
+                              headers={"content-type": "text/html"})
+
+    respx_mock.route().mock(side_effect=handler)
+    await WebCrawlCollector().collect(_port_target(443))
+    assert not any(":9090" in u or u.endswith("/other") for u in seen)
+    assert any(u.endswith("/about") for u in seen)
